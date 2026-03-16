@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Rebook</title>
+<script src="https://accounts.google.com/gsi/client"></script>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0;}
+  body{font-family:Google Sans,Arial,sans-serif;background:#f8f9fa;display:flex;align-items:center;justify-content:center;min-height:100vh;}
+  .card{background:#fff;border-radius:12px;padding:32px;width:380px;box-shadow:0 4px 24px rgba(0,0,0,0.12);}
+  h2{font-size:20px;color:#202124;margin-bottom:24px;display:flex;align-items:center;gap:8px;}
+  label{display:block;font-size:13px;color:#5f6368;margin-bottom:16px;}
+  label span{display:block;margin-bottom:6px;}
+  input,select{width:100%;padding:9px 12px;border:1px solid #dadce0;border-radius:6px;font-size:14px;color:#202124;outline:none;transition:border 0.2s;}
+  input:focus,select:focus{border-color:#1a73e8;}
+  .attendees{font-size:12px;color:#5f6368;margin-top:4px;min-height:16px;}
+  .actions{display:flex;justify-content:flex-end;gap:12px;margin-top:24px;}
+  button{padding:9px 22px;border-radius:6px;font-size:14px;cursor:pointer;border:none;}
+  .btn-cancel{background:#fff;border:1px solid #dadce0;color:#5f6368;}
+  .btn-book{background:#1a73e8;color:#fff;}
+  .btn-book:hover{background:#1557b0;}
+  .btn-book:disabled{background:#ccc;cursor:not-allowed;}
+  .status{font-size:13px;color:#5f6368;margin-top:16px;min-height:20px;text-align:center;}
+  .success{color:#188038;font-size:15px;text-align:center;padding:16px 0;}
+  .warning{background:#fef7e0;border:1px solid #f9ab00;border-radius:6px;padding:10px 14px;font-size:13px;color:#7a4f00;margin-bottom:16px;display:none;}
+</style>
+</head>
+<body>
+<div class="card">
+  <h2>📅 Rebook Appointment</h2>
+  <div class="warning" id="conflict-warning"></div>
+  <div id="form-area">
+    <label><span>Event title</span>
+      <input type="text" id="rb-title" placeholder="e.g. Coaching Call">
+    </label>
+    <label><span>Weeks ahead</span>
+      <select id="rb-weeks">
+        <option value="1">1 week</option>
+        <option value="2">2 weeks</option>
+        <option value="4" selected>4 weeks</option>
+        <option value="6">6 weeks</option>
+      </select>
+    </label>
+    <label><span>Time</span>
+      <select id="rb-time"></select>
+    </label>
+    <label><span>Duration</span>
+      <select id="rb-duration">
+        <option value="30">30 minutes</option>
+        <option value="60" selected>1 hour</option>
+        <option value="90">1.5 hours</option>
+        <option value="120">2 hours</option>
+      </select>
+    </label>
+    <div class="attendees" id="attendee-display"></div>
+    <div class="actions">
+      <button class="btn-cancel" onclick="window.close()">Cancel</button>
+      <button class="btn-book" id="btn-book" onclick="handleBook()">Book</button>
+    </div>
+  </div>
+  <div class="status" id="status"></div>
+</div>
+
+<script>
+const CLIENT_ID = '80393015616-6dqda9f6krskl6tghk51usgf7ulkkl8c.apps.googleusercontent.com';
+const SCOPES = 'https://www.googleapis.com/auth/calendar';
+const SESSION_KEY = 'rebook_token';
+let accessToken = null;
+let pendingEvent = null;
+
+function getParams() {
+  const p = new URLSearchParams(window.location.search);
+  return {
+    title: p.get('title') || '',
+    hours: parseInt(p.get('hours')) || 9,
+    minutes: parseInt(p.get('minutes')) || 0,
+    attendees: p.get('attendees') ? p.get('attendees').split(',').filter(Boolean) : []
+  };
+}
+
+function buildTimeOptions(defaultHours, defaultMinutes) {
+  const sel = document.getElementById('rb-time');
+  for (let h = 7; h <= 19; h++) {
+    for (let m of [0, 30]) {
+      const label = (h % 12 || 12) + ':' + (m === 0 ? '00' : '30') + ' ' + (h < 12 ? 'AM' : 'PM');
+      const opt = document.createElement('option');
+      opt.value = h + ':' + m;
+      opt.textContent = label;
+      if (h === defaultHours && m === defaultMinutes) opt.selected = true;
+      sel.appendChild(opt);
+    }
+  }
+}
+
+function init() {
+  const params = getParams();
+  document.getElementById('rb-title').value = params.title;
+  buildTimeOptions(params.hours, params.minutes);
+  if (params.attendees.length > 0) {
+    document.getElementById('attendee-display').textContent = '👤 ' + params.attendees.join(', ');
+  }
+  const cached = sessionStorage.getItem(SESSION_KEY);
+  if (cached) {
+    const parsed = JSON.parse(cached);
+    if (parsed.expiry > Date.now()) {
+      accessToken = parsed.token;
+      return;
+    }
+  }
+  authenticate();
+}
+
+function authenticate() {
+  setStatus('Authenticating...');
+  google.accounts.oauth2.initTokenClient({
+    client_id: CLIENT_ID,
+    scope: SCOPES,
+    callback: function(resp) {
+      if (resp.error) { setStatus('Auth error: ' + resp.error); return; }
+      accessToken = resp.access_token;
+      sessionStorage.setItem(SESSION_KEY, JSON.stringify({
+        token: accessToken,
+        expiry: Date.now() + (55 * 60 * 1000)
+      }));
+      setStatus('');
+      if (pendingEvent) submitEvent(pendingEvent);
+    }
+  }).requestAccessToken();
+}
+
+function handleBook() {
+  const title = document.getElementById('rb-title').value.trim();
+  if (!title) { setStatus('Please enter a title.'); return; }
+  const weeks = parseInt(document.getElementById('rb-weeks').value);
+  const timeParts = document.getElementById('rb-time').value.split(':');
+  const hours = parseInt(timeParts[0]);
+  const mins = parseInt(timeParts[1]);
+  const duration = parseInt(document.getElementById('rb-duration').value);
+  const params = getParams();
+  const target = new Date();
+  target.setDate(target.getDate() + (weeks * 7));
+  target.setHours(hours, mins, 0, 0);
+  const end = new Date(target.getTime() + duration * 60 * 1000);
+  const attendees = params.attendees.map(e => ({ email: e }));
+  const event = {
+    summary: title,
+    start: { dateTime: target.toISOString() },
+    end: { dateTime: end.toISOString() },
+    attendees: attendees,
+    conferenceData: { createRequest: { requestId: Math.random().toString(36).substr(2, 9) } }
+  };
+  pendingEvent = event;
+  document.getElementById('btn-book').disabled = true;
+  setStatus('Checking availability...');
+  if (!accessToken) { authenticate(); return; }
+  checkAndBook(event, target, end);
+}
+
+function checkAndBook(event, target, end) {
+  const headers = { 'Authorization': 'Bearer ' + accessToken, 'Content-Type': 'application/json' };
+  fetch('https://www.googleapis.com/calendar/v3/calendars/primary/events?timeMin=' + target.toISOString() + '&timeMax=' + end.toISOString() + '&singleEvents=true', { headers })
+  .then(r => r.json())
+  .then(data => {
+    const conflicts = (data.items || []).filter(e => e.status !== 'cancelled');
+    if (conflicts.length > 0) {
+      const names = conflicts.map(e => e.summary).join(', ');
+      const w = document.getElementById('conflict-warning');
+      w.textContent = '⚠️ Conflict: "' + names + '" already at this time. Click Book again to confirm.';
+      w.style.display = 'block';
+      document.getElementById('btn-book').disabled = false;
+      document.getElementById('btn-book').textContent = 'Book anyway';
+      document.getElementById('btn-book').onclick = () => submitEvent(event);
+      setStatus('');
+      return;
+    }
+    submitEvent(event);
+  })
+  .catch(e => { setStatus('Error: ' + e.message); document.getElementById('btn-book').disabled = false; });
+}
+
+function submitEvent(event) {
+  const headers = { 'Authorization': 'Bearer ' + accessToken, 'Content-Type': 'application/json' };
+  setStatus('Creating event...');
+  fetch('https://www.googleapis.com/calendar/v3/calendars/primary/events?conferenceDataVersion=1', {
+    method: 'POST', headers, body: JSON.stringify(event)
+  })
+  .then(r => r.json())
+  .then(ev => {
+    if (ev.error) { setStatus('Error: ' + ev.error.message); document.getElementById('btn-book').disabled = false; return; }
+    document.getElementById('form-area').innerHTML =
+      '<div class="success">' +
+      '✅ Booked!<br><br>' +
+      '<strong>' + ev.summary + '</strong><br><br>' +
+      (ev.hangoutLink ? '🎥 <a href="' + ev.hangoutLink + '" target="_blank">Join link: ' + ev.hangoutLink + '</a>' : '') +
+      '<br><br><small>' + new Date(ev.start.dateTime).toLocaleString() + '</small>' +
+      '</div>';
+  })
+  .catch(e => { setStatus('Error: ' + e.message); document.getElementById('btn-book').disabled = false; });
+}
+
+function setStatus(msg) { document.getElementById('status').textContent = msg; }
+
+window.onload = init;
+</script>
+</body>
+</html>
