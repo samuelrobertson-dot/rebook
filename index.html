@@ -88,11 +88,15 @@ let pendingEvent = null;
 
 function getParams() {
   const p = new URLSearchParams(window.location.search);
+  const now = new Date();
   return {
     title: p.get('title') || '',
     hours: parseInt(p.get('hours')) || 9,
     minutes: parseInt(p.get('minutes')) || 0,
-    attendees: p.get('attendees') ? p.get('attendees').split(',').filter(Boolean) : []
+    attendees: p.get('attendees') ? p.get('attendees').split(',').filter(Boolean) : [],
+    year: parseInt(p.get('year')) || now.getFullYear(),
+    month: parseInt(p.get('month')) || now.getMonth(),
+    day: parseInt(p.get('day')) || now.getDate()
   };
 }
 
@@ -159,16 +163,17 @@ function authenticate() {
 }
 
 function getTargetDate() {
+  const params = getParams();
   const weeks = parseInt(document.getElementById('rb-weeks').value);
   const timeParts = document.getElementById('rb-time').value.split(':');
   const hours = parseInt(timeParts[0]);
   const mins = parseInt(timeParts[1]);
   const duration = parseInt(document.getElementById('rb-duration').value);
-  const target = new Date();
-  target.setDate(target.getDate() + (weeks * 7));
-  target.setHours(hours, mins, 0, 0);
-  const end = new Date(target.getTime() + duration * 60 * 1000);
-  return { target, end, duration };
+  const base = new Date(params.year, params.month, params.day);
+  base.setDate(base.getDate() + (weeks * 7));
+  base.setHours(hours, mins, 0, 0);
+  const end = new Date(base.getTime() + duration * 60 * 1000);
+  return { target: base, end, duration };
 }
 
 function handleBook() {
@@ -276,7 +281,6 @@ function getFreeSlots(busyPeriods, day1, day2, duration, originalTarget) {
       const slotEnd = new Date(slotStart.getTime() + duration * 60 * 1000);
       if (slotEnd > dayEnd) break;
 
-      // Skip the originally requested time
       if (slotStart.toDateString() === targetDateStr &&
           slotStart.getHours() === originalTarget.getHours() &&
           slotStart.getMinutes() === originalTarget.getMinutes()) {
@@ -295,7 +299,7 @@ function getFreeSlots(busyPeriods, day1, day2, duration, originalTarget) {
     if (daySlots.length > 0) {
       slots.push({ day: new Date(day), times: daySlots.slice(0, 5) });
     }
-    if (slots.length > 0 && d === 0) break; // found slots on day 1, don't check day 2
+    if (slots.length > 0 && d === 0) break;
   }
   return slots;
 }
