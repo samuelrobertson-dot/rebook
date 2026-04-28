@@ -83,6 +83,7 @@ const SCOPES = 'https://www.googleapis.com/auth/calendar';
 const STORAGE_KEY = 'rebook_token';
 const BOOKABLE_START = { h: 9, m: 0 };
 const BOOKABLE_END = { h: 15, m: 30 };
+const COLOR_ID = '5'; // Banana — matches "Member Call" category
 let accessToken = null;
 let pendingEvent = null;
 
@@ -143,6 +144,32 @@ function init() {
   authenticate();
 }
 
+// FIX A (Part 1): Fetch the calendar owner's email so we can mark self as accepted
+function getCalendarEmail(callback) {
+  fetch('https://www.googleapis.com/calendar/v3/calendars/primary', {
+    headers: { 'Authorization': 'Bearer ' + accessToken }
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(data) { callback(data.id); })
+  .catch(function() { callback(null); });
+}
+
+// FIX A (Part 2): Build the event object with self-acceptance and colorId
+function buildEvent(title, target, end, attendees, selfEmail) {
+  const attendeeList = attendees.map(function(e) { return { email: e }; });
+  if (selfEmail) {
+    attendeeList.push({ email: selfEmail, self: true, responseStatus: 'accepted' });
+  }
+  return {
+    summary: title,
+    start: { dateTime: target.toISOString() },
+    end: { dateTime: end.toISOString() },
+    attendees: attendeeList,
+    colorId: COLOR_ID,
+    conferenceData: { createRequest: { requestId: Math.random().toString(36).substr(2, 9) } }
+  };
+}
+
 function authenticate() {
   setStatus('Authorising...');
   google.accounts.oauth2.initTokenClient({
@@ -157,7 +184,21 @@ function authenticate() {
       }));
       document.getElementById('auth-badge').textContent = '🔒 Authorised';
       setStatus('');
-      if (pendingEvent) submitEvent(pendingEvent);
+      if (pendingEvent) {
+        if (pendingEvent._needsEmail) {
+          // FIX B + FIX A: After auth, resolve email then run full check (not direct submit)
+          const { title, target, end, duration, params } = pendingEvent;
+          getCalendarEmail(function(selfEmail) {
+            const event = buildEvent(title, target, end, params.attendees, selfEmail);
+            pendingEvent = event;
+            checkAndBook(event, target, end, duration);
+          });
+        } else {
+          // FIX B: Route through checkAndBook, not submitEvent
+          const { target, end, duration } = getTargetDate();
+          checkAndBook(pendingEvent, target, end, duration);
+        }
+      }
     }
   }).requestAccessToken();
 }
@@ -176,25 +217,30 @@ function getTargetDate() {
   return { target: base, end, duration };
 }
 
+// FIX A (Part 3) + FIX B: handleBook now fetches email before building event,
+// and stores _needsEmail placeholder if auth is required
 function handleBook() {
   const title = document.getElementById('rb-title').value.trim();
   if (!title) { setStatus('Please enter a title.'); return; }
   const { target, end, duration } = getTargetDate();
   const params = getParams();
-  const attendees = params.attendees.map(function(e) { return { email: e }; });
-  const event = {
-    summary: title,
-    start: { dateTime: target.toISOString() },
-    end: { dateTime: end.toISOString() },
-    attendees: attendees,
-    conferenceData: { createRequest: { requestId: Math.random().toString(36).substr(2, 9) } }
-  };
-  pendingEvent = event;
+
   document.getElementById('btn-book').disabled = true;
   document.getElementById('conflict-box').style.display = 'none';
   setStatus('Checking availability...');
-  if (!accessToken) { authenticate(); return; }
-  checkAndBook(event, target, end, duration);
+
+  if (!accessToken) {
+    // Store enough to rebuild the event after auth, flagged for email resolution
+    pendingEvent = { _needsEmail: true, title, target, end, duration, params };
+    authenticate();
+    return;
+  }
+
+  getCalendarEmail(function(selfEmail) {
+    const event = buildEvent(title, target, end, params.attendees, selfEmail);
+    pendingEvent = event;
+    checkAndBook(event, target, end, duration);
+  });
 }
 
 function checkAndBook(event, target, end, duration) {
@@ -334,16 +380,12 @@ function renderSuggestions(slotGroups, duration, originalEvent) {
         document.querySelectorAll('.suggestion-btn').forEach(function(b) { b.classList.remove('selected'); });
         btn.classList.add('selected');
         const slotEnd = new Date(slot.getTime() + duration * 60 * 1000);
-        const attendees = params.attendees.map(function(e) { return { email: e }; });
-        const newEvent = {
-          summary: originalEvent.summary,
-          start: { dateTime: slot.toISOString() },
-          end: { dateTime: slotEnd.toISOString() },
-          attendees: attendees,
-          conferenceData: { createRequest: { requestId: Math.random().toString(36).substr(2, 9) } }
-        };
-        setStatus('');
-        submitEvent(newEvent);
+        // FIX A: Use buildEvent for suggestion bookings too (self-accept + colorId)
+        getCalendarEmail(function(selfEmail) {
+          const newEvent = buildEvent(originalEvent.summary, slot, slotEnd, params.attendees, selfEmail);
+          setStatus('');
+          submitEvent(newEvent);
+        });
       };
       row.appendChild(btn);
     });
